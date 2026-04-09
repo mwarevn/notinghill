@@ -5,10 +5,10 @@ const api = axios.create({
   timeout: 30000,
 })
 
-// ── Dashboard ──────────────────────────────────────────────────────────────
+// Dashboard
 export const getDashboard = () => api.get('/dashboard').then(r => r.data)
 
-// ── Search ─────────────────────────────────────────────────────────────────
+// Search
 export const searchFiles = (params: Record<string, any>) =>
   api.get('/search', { params }).then(r => r.data)
 
@@ -27,60 +27,24 @@ export const getItemRawUrl = (id: number, download = false) =>
 export const getItemTextUrl = (id: number, maxChars = 50000) =>
   `/api/search/text/${id}?max_chars=${maxChars}`
 
-export interface AskSearchParams {
-  q: string
-  file_type?: string      // maps to AskRequest.file_type on BE
-  extension?: string
-  root_id?: number
-  min_size?: number
-  max_size?: number
-  since_ts?: number
-  until_ts?: number
-  order_by?: string
-  limit?: number
-  offset?: number
-}
-
-export interface AskSearchResponse {
-  query: string
-  count: number
-  results: any[]
-  // Top-level answer (promoted from llm.answer for easy access)
-  answer: string
-  mode: string
-  used_result_count: number
-  context_chars: number
-  provider: string
-  model: string
-  // Also available nested for advanced consumers
-  llm: {
-    answer: string
-    mode: string
-    used_result_count: number
-    context_chars: number
-    provider: string
-    model: string
-  }
-}
-
-export const askSearch = (data: AskSearchParams): Promise<AskSearchResponse> =>
+export const askSearch = (data: { q: string; limit?: number }) =>
   api.post('/search/ask', data).then(r => r.data)
 
-// ── Images ─────────────────────────────────────────────────────────────────
+// Images
 export const listImages = (params: Record<string, any>) =>
   api.get('/images', { params }).then(r => r.data)
 
 export const getImageItem = (id: number) =>
   api.get(`/images/item/${id}`).then(r => r.data)
 
-// ── Timeline ───────────────────────────────────────────────────────────────
+// Timeline
 export const getTimelineBuckets = (params: Record<string, any>) =>
   api.get('/timeline/buckets', { params }).then(r => r.data)
 
 export const getBucketItems = (bucket: string, params: Record<string, any>) =>
   api.get(`/timeline/items/${encodeURIComponent(bucket)}`, { params }).then(r => r.data)
 
-// ── Duplicates ─────────────────────────────────────────────────────────────
+// Duplicates
 export const getExactDuplicates = (params?: any) =>
   api.get('/duplicates/exact', { params }).then(r => r.data)
 
@@ -96,7 +60,7 @@ export const markReviewed = (groupItemId: number, status = 'reviewed') =>
 export const getDupStats = () =>
   api.get('/duplicates/stats').then(r => r.data)
 
-// ── Indexing ───────────────────────────────────────────────────────────────
+// Indexing
 export const listRoots = () =>
   api.get('/index/roots').then(r => r.data)
 
@@ -118,7 +82,7 @@ export const getJobs = () =>
 export const getJobProgress = (jobId: number) =>
   api.get(`/index/jobs/${jobId}/progress`).then(r => r.data)
 
-// ── Settings ───────────────────────────────────────────────────────────────
+// Settings
 export const getSettings = () =>
   api.get('/settings').then(r => r.data)
 
@@ -135,3 +99,28 @@ export const testLlmConnection = () =>
   api.post('/settings/llm/test').then(r => r.data)
 
 export default api
+
+// Virtual Folders
+export const listVFolders = () =>
+  api.get('/vfolders').then(r => r.data)
+
+export const createVFolder = (data: { name: string; parent_vf_id?: number | null; color?: string; icon?: string }) =>
+  api.post('/vfolders', data).then(r => r.data)
+
+export const updateVFolder = (vfId: number, data: { name?: string; color?: string; icon?: string; parent_vf_id?: number | null }) =>
+  api.patch(`/vfolders/${vfId}`, data).then(r => r.data)
+
+export const deleteVFolder = (vfId: number) =>
+  api.delete(`/vfolders/${vfId}`).then(r => r.data)
+
+export const getVFolderItems = (vfId: number) =>
+  api.get(`/vfolders/${vfId}/items`).then(r => r.data)
+
+export const addItemToVFolder = (vfId: number, itemId: number) =>
+  api.post(`/vfolders/${vfId}/items`, { item_id: itemId }).then(r => r.data)
+
+export const removeItemFromVFolder = (vfId: number, itemId: number) =>
+  api.delete(`/vfolders/${vfId}/items/${itemId}`).then(r => r.data)
+
+export const getItemVFolders = (itemId: number) =>
+  api.get(`/vfolders/item/${itemId}/folders`).then(r => r.data)

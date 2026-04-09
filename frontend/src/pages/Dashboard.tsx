@@ -1,8 +1,7 @@
 // NotingHill — pages/Dashboard.tsx
-import { useEffect, useCallback, useState, useRef } from 'react'
+import { useEffect, useCallback, useState } from 'react'
 import { useStore } from '../store'
 import { askSearch, getDashboard, getLlmSettings, openFile, revealFile } from '../api/client'
-import type { AskSearchResponse } from '../api/client'
 import { StatCard, SectionHeader, Panel, Spinner, EmptyState, ProgressBar, Badge } from '../components/ui'
 import { formatSize, formatDateTime } from '../utils/helpers'
 
@@ -11,7 +10,6 @@ type ChatMessage = {
   text: string
   ts: number
   results?: any[]
-  model?: string
 }
 
 const isEnabledValue = (value: unknown) => {
@@ -19,27 +17,20 @@ const isEnabledValue = (value: unknown) => {
   return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on'
 }
 
-// Adaptive poll: fast when jobs are active, slow/off when idle
-const POLL_ACTIVE_MS = 3000
-const POLL_IDLE_MS   = 15000
-
 export default function Dashboard() {
   const { t, dashData, dashLoading, setDashData, setDashLoading, setActiveTab } = useStore()
-  const [chatInput, setChatInput]     = useState('')
+  const [chatInput, setChatInput] = useState('')
   const [chatLoading, setChatLoading] = useState(false)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
-  const [llmEnabled, setLlmEnabled]   = useState(false)
-  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [llmEnabled, setLlmEnabled] = useState(false)
 
   const load = useCallback(async () => {
     setDashLoading(true)
     try {
       const data = await getDashboard()
       setDashData(data)
-      return data
     } catch (e) {
       console.error(e)
-      return null
     } finally {
       setDashLoading(false)
     }
@@ -49,91 +40,80 @@ export default function Dashboard() {
     try {
       const data = await getLlmSettings()
       setLlmEnabled(isEnabledValue(data?.llm_enabled))
-    } catch {
+    } catch (e) {
+      console.error('Failed to load LLM settings', e)
       setLlmEnabled(false)
     }
   }, [])
 
-  // Smart adaptive polling
-  const scheduleNextPoll = useCallback((data: any) => {
-    if (pollRef.current) clearTimeout(pollRef.current)
-    const hasActiveJobs = (data?.active_jobs?.length ?? 0) > 0
-    const delay = hasActiveJobs ? POLL_ACTIVE_MS : POLL_IDLE_MS
-    pollRef.current = setTimeout(async () => {
-      const next = await load()
-      scheduleNextPoll(next)
-    }, delay)
-  }, [load])
-
   useEffect(() => {
-    load().then(scheduleNextPoll)
+    load()
     loadLlmSettings()
-    return () => {
-      if (pollRef.current) clearTimeout(pollRef.current)
+
+    const scheduleNext = () => {
+      const hasActiveJobs = (useStore.getState().dashData?.active_jobs?.length ?? 0) > 0
+      const delay = hasActiveJobs ? 3000 : 15000
+      return setTimeout(() => {
+        load().finally(() => {
+          ivRef.current = scheduleNext()
+        })
+      }, delay)
     }
-  }, [load, loadLlmSettings, scheduleNextPoll])
+
+    const ivRef = { current: scheduleNext() }
+    return () => clearTimeout(ivRef.current)
+  }, [load, loadLlmSettings])
 
   useEffect(() => {
-    const handleLlmUpdate = () => loadLlmSettings()
-    window.addEventListener('llm-settings-updated', handleLlmUpdate)
-    return () => window.removeEventListener('llm-settings-updated', handleLlmUpdate)
+    const handleLlmSettingsUpdated = () => {
+      loadLlmSettings()
+    }
+    window.addEventListener('llm-settings-updated', handleLlmSettingsUpdated)
+    return () => window.removeEventListener('llm-settings-updated', handleLlmSettingsUpdated)
   }, [loadLlmSettings])
 
   const handleAsk = async () => {
     const q = chatInput.trim()
     if (!q || chatLoading || !llmEnabled) return
 
-    setChatMessages(prev => [...prev, { role: 'user', text: q, ts: Date.now() }])
+    const userMessage: ChatMessage = { role: 'user', text: q, ts: Date.now() }
+    setChatMessages((prev) => [...prev, userMessage])
     setChatInput('')
     setChatLoading(true)
 
     try {
-      const data: AskSearchResponse = await askSearch({ q, limit: 8 })
-
-      // data.answer is now top-level (fixed response shape)
-      const answer = data.answer || 'No answer returned.'
-      const results = data.results || []
-
-      setChatMessages(prev => [
-        ...prev,
-        {
-          role: 'assistant',
-          text: answer,
-          ts: Date.now(),
-          results,
-          model: data.model ? `${data.provider}/${data.model}` : undefined,
-        },
-      ])
+      const data = await askSearch({ q, limit: 8 })
+      const answer = data?.answer || data?.message || data?.summary || 'No answer returned.'
+      const results = data?.results || data?.items || []
+      const assistantMessage: ChatMessage = {
+        role: 'assistant',
+        text: answer,
+        ts: Date.now(),
+        results,
+      }
+      setChatMessages((prev) => [...prev, assistantMessage])
     } catch (e: any) {
-      const errText =
-        e?.response?.data?.detail ||
-        e?.message ||
-        'Search assistant request failed.'
-      setChatMessages(prev => [
-        ...prev,
-        { role: 'assistant', text: errText, ts: Date.now(), results: [] },
-      ])
-    } finally {
-      setChatLoading(false)
+      const assistantMessage: ChatMessage = {
+        role: 'assistant',
+        text: e?.response?.data?.detail || e?.message || 'Search assistant request failed.',
+        ts: Date.now(),
+        results: [],
+      }
+      setChatMessages((prev) => [...prev, assistantMessage])
     }
-  }
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault()
-      handleAsk()
-    }
+    setChatLoading(false)
   }
 
   const d = dashData
   if (dashLoading && !d) return <Spinner />
 
-  const stats      = d?.stats ?? {}
-  const dupStats   = d?.dup_stats ?? {}
-  const recent     = d?.recent_files ?? []
+  const stats = d?.stats ?? {}
+  const dupStats = d?.dup_stats ?? {}
+  const recent = d?.recent_files ?? []
   const activeJobs = d?.active_jobs ?? []
-  const roots      = d?.roots ?? []
-  const insights   = d?.insights ?? []
+  const roots = d?.roots ?? []
+  const insights = d?.insights ?? []
 
   return (
     <div className="layout-page animate-fade-in" style={{ maxWidth: 1280, margin: '0 auto' }}>
@@ -152,17 +132,12 @@ export default function Dashboard() {
         </SectionHeader>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 0.9fr', gap: 16 }}>
-          {/* Chat thread */}
           <div className="nh-card" style={{ padding: 16, minHeight: 360, background: 'rgba(255,255,255,0.03)' }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxHeight: 420, overflowY: 'auto', paddingRight: 4 }}>
               {chatMessages.length === 0 ? (
                 <EmptyState
                   icon="✦"
-                  message={
-                    llmEnabled
-                      ? 'Ask naturally about your indexed files, documents, images, audio, duplicates, or timeline.'
-                      : 'Enable LLM in Settings first, then come back here to ask natural-language questions.'
-                  }
+                  message={llmEnabled ? 'Ask naturally about your indexed files, documents, images, audio, duplicates, or timeline.' : 'Enable LLM in Settings first, then come back here to ask natural-language questions.'}
                 />
               ) : (
                 chatMessages.map((msg, index) => (
@@ -175,7 +150,7 @@ export default function Dashboard() {
                     }}
                   >
                     <div style={{ fontSize: 9, color: msg.role === 'user' ? 'var(--cyan)' : 'var(--purple)', letterSpacing: 2, marginBottom: 6 }}>
-                      {msg.role === 'user' ? 'YOU' : `ASSISTANT${msg.model ? ` · ${msg.model}` : ''}`}
+                      {msg.role === 'user' ? 'YOU' : 'ASSISTANT'}
                     </div>
                     <div
                       className="nh-card"
@@ -210,9 +185,15 @@ export default function Dashboard() {
                                 {item.full_path || item.path || ''}
                               </div>
                               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                                <button className="nh-btn" style={{ fontSize: 9, padding: '7px 12px' }} onClick={() => openFile(item.item_id)}>OPEN</button>
-                                <button className="nh-btn" style={{ fontSize: 9, padding: '7px 12px' }} onClick={() => revealFile(item.item_id)}>SHOW IN FOLDER</button>
-                                <button className="nh-btn" style={{ fontSize: 9, padding: '7px 12px' }} onClick={() => setActiveTab('search')}>GO TO SEARCH</button>
+                                <button className="nh-btn" style={{ fontSize: 9, padding: '7px 12px' }} onClick={() => openFile(item.item_id)}>
+                                  OPEN
+                                </button>
+                                <button className="nh-btn" style={{ fontSize: 9, padding: '7px 12px' }} onClick={() => revealFile(item.item_id)}>
+                                  SHOW IN FOLDER
+                                </button>
+                                <button className="nh-btn" style={{ fontSize: 9, padding: '7px 12px' }} onClick={() => setActiveTab('search')}>
+                                  GO TO SEARCH
+                                </button>
                               </div>
                             </div>
                           ))}
@@ -225,7 +206,6 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* Input panel */}
           <div className="nh-card" style={{ padding: 16, background: 'rgba(255,255,255,0.03)' }}>
             <div style={{ fontSize: 10, color: 'var(--text3)', letterSpacing: 2, marginBottom: 10 }}>QUICK PROMPTS</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -235,7 +215,7 @@ export default function Dashboard() {
                 'Which MP3 files are duplicates?',
                 'Summarize files indexed this week.',
                 'Find spreadsheets mentioning invoice or payment.',
-              ].map(prompt => (
+              ].map((prompt) => (
                 <button
                   key={prompt}
                   className="nh-btn"
@@ -251,24 +231,17 @@ export default function Dashboard() {
             <textarea
               className="nh-input"
               value={chatInput}
-              onChange={e => setChatInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Ask about files, content, metadata, duplicates, timeline…  (Ctrl+Enter to send)"
+              onChange={(e) => setChatInput(e.target.value)}
+              placeholder="Ask about files, content, metadata, duplicates, timeline..."
               style={{ width: '100%', minHeight: 148, resize: 'vertical' }}
             />
 
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginTop: 12, flexWrap: 'wrap' }}>
               <div style={{ fontSize: 10, color: 'var(--text3)' }}>
-                {llmEnabled
-                  ? 'Searched from SQLite, then summarized by LLM. Ctrl+Enter to send.'
-                  : 'LLM is off — enable it in Settings.'}
+                {llmEnabled ? 'Results are searched from SQLite first, then summarized by the LLM.' : 'LLM is off. Turn it on in Settings.'}
               </div>
-              <button
-                className="nh-btn primary"
-                onClick={handleAsk}
-                disabled={!chatInput.trim() || chatLoading || !llmEnabled}
-              >
-                {chatLoading ? 'ASKING…' : 'ASK AI'}
+              <button className="nh-btn primary" onClick={handleAsk} disabled={!chatInput.trim() || chatLoading || !llmEnabled}>
+                {chatLoading ? 'ASKING...' : 'ASK AI'}
               </button>
             </div>
           </div>
@@ -287,9 +260,9 @@ export default function Dashboard() {
             <div style={{ fontSize: 10, color: 'var(--text3)', padding: '12px 0', letterSpacing: 1 }}>— no active jobs —</div>
           ) : (
             activeJobs.map((job: any) => {
-              const prog  = job.progress ?? {}
+              const prog = job.progress ?? {}
               const total = prog.queued ?? job.queued_count ?? 0
-              const done  = prog.indexed ?? job.indexed_count ?? 0
+              const done = prog.indexed ?? job.indexed_count ?? 0
               return (
                 <div key={job.job_id} style={{ marginBottom: 16 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
@@ -334,7 +307,9 @@ export default function Dashboard() {
                 <div key={bt.file_type_group} style={{ marginBottom: 8 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
                     <span style={{ fontSize: 9, color: 'var(--text2)', letterSpacing: 1 }}>{(bt.file_type_group ?? 'other').toUpperCase()}</span>
-                    <span style={{ fontSize: 9, color: 'var(--text3)' }}>{bt.cnt} · {formatSize(bt.sz)}</span>
+                    <span style={{ fontSize: 9, color: 'var(--text3)' }}>
+                      {bt.cnt} · {formatSize(bt.sz)}
+                    </span>
                   </div>
                   <ProgressBar value={bt.cnt} max={stats.total_files || 1} />
                 </div>
@@ -358,8 +333,12 @@ export default function Dashboard() {
               <div
                 key={r.root_id}
                 style={{
-                  background: 'var(--bg2)', border: '1px solid var(--border)',
-                  padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  background: 'var(--bg2)',
+                  border: '1px solid var(--border)',
+                  padding: '10px 14px',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
                 }}
               >
                 <div>

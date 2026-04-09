@@ -6,6 +6,7 @@ import Images from './pages/Images'
 import Multimedia from './pages/Multimedia'
 import Timeline from './pages/Timeline'
 import Duplicates from './pages/Duplicates'
+import VirtualFolders from './pages/VirtualFolders'
 import Indexing from './pages/Indexing'
 import Settings from './pages/Settings'
 import { useStore } from './store'
@@ -24,6 +25,7 @@ export default function App() {
     multimedia: Multimedia,
     timeline: Timeline,
     duplicates: Duplicates,
+    vfolders: VirtualFolders,
     indexing: Indexing,
     settings: Settings,
   }[activeTab] ?? Dashboard

@@ -64,7 +64,6 @@ def upsert_duplicate_group(group_type: str, group_key: str, item_ids: list[int],
             "SELECT group_id FROM duplicate_groups WHERE group_type=? AND group_key=?",
             (group_type, group_key)
         ).fetchone()
-
         if existing:
             gid = existing["group_id"]
             con.execute("DELETE FROM duplicate_group_items WHERE group_id=?", (gid,))
@@ -75,23 +74,16 @@ def upsert_duplicate_group(group_type: str, group_key: str, item_ids: list[int],
             """, (group_type, group_key, now, now))
             gid = cur.lastrowid
 
-        # Batch size lookup — one query instead of N
-        if item_ids:
-            placeholders = ",".join("?" * len(item_ids))
-            size_rows = con.execute(
-                f"SELECT item_id, COALESCE(size_bytes,0) AS sz FROM items WHERE item_id IN ({placeholders})",
-                item_ids,
-            ).fetchall()
-            size_map = {r["item_id"]: r["sz"] for r in size_rows}
-        else:
-            size_map = {}
-
-        total_size = sum(size_map.get(iid, 0) for iid in item_ids)
-
-        con.executemany(
-            "INSERT INTO duplicate_group_items(group_id,item_id,similarity_score) VALUES(?,?,?)",
-            [(gid, iid, (scores or {}).get(iid, 1.0)) for iid in item_ids],
-        )
+        total_size = 0
+        for iid in item_ids:
+            score = (scores or {}).get(iid, 1.0)
+            row = con.execute("SELECT size_bytes FROM items WHERE item_id=?", (iid,)).fetchone()
+            if row:
+                total_size += row["size_bytes"] or 0
+            con.execute("""
+                INSERT INTO duplicate_group_items(group_id,item_id,similarity_score)
+                VALUES(?,?,?)
+            """, (gid, iid, score))
 
         con.execute("""
             UPDATE duplicate_groups SET item_count=?,total_size_bytes=?,updated_ts=?

@@ -8,6 +8,7 @@ interface AppState {
   theme: 'dark' | 'light'
   lang: Lang
   activeTab: string
+  animationsEnabled: boolean
 
   // Dashboard
   dashData: any
@@ -38,6 +39,11 @@ interface AppState {
   activeJobs: any[]
   queueSize: number
 
+  // Virtual Folders
+  vfolders: any[]
+  vfSelectedId: number | null
+  vfItems: any[]
+
   // Settings
   settings: Record<string, string>
 
@@ -45,6 +51,7 @@ interface AppState {
   setTheme: (t: 'dark' | 'light') => void
   setLang: (l: Lang) => void
   setActiveTab: (t: string) => void
+  setAnimationsEnabled: (v: boolean) => void
   setDashData: (d: any) => void
   setDashLoading: (v: boolean) => void
   setSearchQuery: (q: string) => void
@@ -60,6 +67,9 @@ interface AppState {
   setDupTab: (t: 'exact' | 'similar_text' | 'similar_image') => void
   setDupGroups: (g: any[]) => void
   setDupStats: (s: any) => void
+  setVFolders: (f: any[]) => void
+  setVFSelectedId: (id: number | null) => void
+  setVFItems: (items: any[]) => void
   setRoots: (r: any[]) => void
   setJobs: (j: any[]) => void
   setActiveJobs: (j: any[]) => void
@@ -74,6 +84,7 @@ export const useStore = create<AppState>()(
       theme: 'dark',
       lang: 'en',
       activeTab: 'dashboard',
+      animationsEnabled: true,
       dashData: null,
       dashLoading: false,
       searchQuery: '',
@@ -89,6 +100,9 @@ export const useStore = create<AppState>()(
       dupTab: 'exact',
       dupGroups: [],
       dupStats: null,
+      vfolders: [],
+      vfSelectedId: null,
+      vfItems: [],
       roots: [],
       jobs: [],
       activeJobs: [],
@@ -101,6 +115,10 @@ export const useStore = create<AppState>()(
       },
       setLang: (lang) => set({ lang }),
       setActiveTab: (activeTab) => set({ activeTab }),
+      setAnimationsEnabled: (animationsEnabled) => {
+        set({ animationsEnabled })
+        document.documentElement.classList.toggle('no-animations', !animationsEnabled)
+      },
       setDashData: (dashData) => set({ dashData }),
       setDashLoading: (dashLoading) => set({ dashLoading }),
       setSearchQuery: (searchQuery) => set({ searchQuery }),
@@ -116,6 +134,9 @@ export const useStore = create<AppState>()(
       setDupTab: (dupTab) => set({ dupTab }),
       setDupGroups: (dupGroups) => set({ dupGroups }),
       setDupStats: (dupStats) => set({ dupStats }),
+      setVFolders: (vfolders) => set({ vfolders }),
+      setVFSelectedId: (vfSelectedId) => set({ vfSelectedId }),
+      setVFItems: (vfItems) => set({ vfItems }),
       setRoots: (roots) => set({ roots }),
       setJobs: (jobs) => set({ jobs }),
       setActiveJobs: (activeJobs) => set({ activeJobs }),
@@ -134,7 +155,7 @@ export const useStore = create<AppState>()(
     }),
     {
       name: 'notinghill-store',
-      partialize: (s) => ({ theme: s.theme, lang: s.lang }),
+      partialize: (s) => ({ theme: s.theme, lang: s.lang, animationsEnabled: s.animationsEnabled }),
     }
   )
 )

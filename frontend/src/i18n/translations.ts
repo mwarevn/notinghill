@@ -11,6 +11,7 @@ export const translations = {
     nav_multimedia:  'MULTIMEDIA',
     nav_timeline:    'TIMELINE',
     nav_duplicates:  'DUPLICATES',
+    nav_vfolders:    'V.FOLDERS',
     nav_indexing:    'INDEXING',
     nav_settings:    'SETTINGS',
 
@@ -184,6 +185,7 @@ export const translations = {
     nav_multimedia:  'ĐA PHƯƠNG TIỆN',
     nav_timeline:    'DÒNG THỜI GIAN',
     nav_duplicates:  'TRÙNG LẶP',
+    nav_vfolders:    'THƯ MỤC ẢO',
     nav_indexing:    'ĐÁNH MỤC',
     nav_settings:    'CÀI ĐẶT',
 

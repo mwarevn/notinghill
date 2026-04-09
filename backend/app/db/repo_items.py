@@ -20,7 +20,6 @@ def _parse_meta_json(value: str | None) -> dict:
 
 
 def upsert_item(data: dict) -> int:
-    """Insert-or-update a single item. Returns item_id in one round-trip."""
     sql = """
     INSERT INTO items (
         root_id, full_path, parent_path, file_name, extension, mime_type,
@@ -48,66 +47,17 @@ def upsert_item(data: dict) -> int:
         last_indexed_ts=excluded.last_indexed_ts,
         change_token=excluded.change_token,
         is_deleted=0
-    RETURNING item_id
     """
     with get_db() as con:
-        row = con.execute(sql, data).fetchone()
-        # RETURNING gives us the id regardless of INSERT vs UPDATE path
-        return row["item_id"]
-
-
-def upsert_item_tx(con, data: dict) -> int:
-    """Same as upsert_item but uses an existing connection (for batched transactions)."""
-    sql = """
-    INSERT INTO items (
-        root_id, full_path, parent_path, file_name, extension, mime_type,
-        size_bytes, created_ts, modified_ts, accessed_ts,
-        best_time_ts, best_time_source, best_time_confidence,
-        file_type_group, indexing_status,
-        is_deleted, is_hidden, is_system,
-        first_seen_ts, last_seen_ts, last_indexed_ts, change_token
-    ) VALUES (
-        :root_id,:full_path,:parent_path,:file_name,:extension,:mime_type,
-        :size_bytes,:created_ts,:modified_ts,:accessed_ts,
-        :best_time_ts,:best_time_source,:best_time_confidence,
-        :file_type_group,:indexing_status,
-        :is_deleted,:is_hidden,:is_system,
-        :first_seen_ts,:last_seen_ts,:last_indexed_ts,:change_token
-    )
-    ON CONFLICT(full_path) DO UPDATE SET
-        size_bytes=excluded.size_bytes,
-        modified_ts=excluded.modified_ts,
-        accessed_ts=excluded.accessed_ts,
-        best_time_ts=excluded.best_time_ts,
-        best_time_source=excluded.best_time_source,
-        indexing_status=excluded.indexing_status,
-        last_seen_ts=excluded.last_seen_ts,
-        last_indexed_ts=excluded.last_indexed_ts,
-        change_token=excluded.change_token,
-        is_deleted=0
-    RETURNING item_id
-    """
-    row = con.execute(sql, data).fetchone()
-    return row["item_id"]
+        cur = con.execute(sql, data)
+        con.commit()
+        return cur.lastrowid or get_item_id_by_path(data["full_path"])
 
 
 def get_item_id_by_path(full_path: str) -> Optional[int]:
     with get_db() as con:
         row = con.execute("SELECT item_id FROM items WHERE full_path=?", (full_path,)).fetchone()
         return row["item_id"] if row else None
-
-
-def batch_load_change_tokens(root_id: int) -> dict[str, str]:
-    """
-    Load all (full_path → change_token) for a root in one query.
-    Used by incremental scan to avoid N per-file round-trips.
-    """
-    with get_db() as con:
-        rows = con.execute(
-            "SELECT full_path, change_token FROM items WHERE root_id=? AND is_deleted=0",
-            (root_id,),
-        ).fetchall()
-    return {row["full_path"]: row["change_token"] for row in rows}
 
 
 def get_item(item_id: int) -> Optional[dict]:
@@ -293,11 +243,8 @@ def list_images(
 
     if q:
         like = f"%{q}%"
-        clauses.append(
-            "(i.file_name LIKE ? OR i.full_path LIKE ? OR COALESCE(im.title,'') LIKE ?"
-            " OR COALESCE(im.camera_model,'') LIKE ?)"
-        )
-        params.extend([like, like, like, like])
+        clauses.append("(i.file_name LIKE ? OR i.full_path LIKE ? OR COALESCE(im.title,'') LIKE ? OR COALESCE(im.camera_model,'') LIKE ? OR COALESCE(im.meta_json,'') LIKE ?)")
+        params.extend([like, like, like, like, like])
     if root_id:
         clauses.append("i.root_id=?")
         params.append(root_id)
@@ -313,19 +260,18 @@ def list_images(
     if until_ts:
         clauses.append("COALESCE(im.taken_ts, i.best_time_ts, i.modified_ts) <= ?")
         params.append(until_ts)
-    # Use indexed has_gps column instead of LIKE on JSON blob
     if has_gps == 1:
-        clauses.append("im.has_gps=1")
+        clauses.append("(im.meta_json LIKE '%\"gps_lat\"%' AND im.meta_json LIKE '%\"gps_lon\"%')")
 
     allowed_orders = {
         "best_time_ts DESC": "COALESCE(im.taken_ts, i.best_time_ts, i.modified_ts) DESC, i.item_id DESC",
-        "best_time_ts ASC":  "COALESCE(im.taken_ts, i.best_time_ts, i.modified_ts) ASC, i.item_id ASC",
-        "modified_ts DESC":  "i.modified_ts DESC, i.item_id DESC",
-        "modified_ts ASC":   "i.modified_ts ASC, i.item_id ASC",
-        "size_bytes DESC":   "i.size_bytes DESC, i.item_id DESC",
-        "size_bytes ASC":    "i.size_bytes ASC, i.item_id ASC",
-        "file_name ASC":     "i.file_name ASC, i.item_id ASC",
-        "file_name DESC":    "i.file_name DESC, i.item_id DESC",
+        "best_time_ts ASC": "COALESCE(im.taken_ts, i.best_time_ts, i.modified_ts) ASC, i.item_id ASC",
+        "modified_ts DESC": "i.modified_ts DESC, i.item_id DESC",
+        "modified_ts ASC": "i.modified_ts ASC, i.item_id ASC",
+        "size_bytes DESC": "i.size_bytes DESC, i.item_id DESC",
+        "size_bytes ASC": "i.size_bytes ASC, i.item_id ASC",
+        "file_name ASC": "i.file_name ASC, i.item_id ASC",
+        "file_name DESC": "i.file_name DESC, i.item_id DESC",
     }
     order_sql = allowed_orders.get(order_by, allowed_orders["best_time_ts DESC"])
 
@@ -334,7 +280,7 @@ def list_images(
         SELECT i.item_id, i.root_id, i.file_name, i.full_path, i.parent_path, i.extension,
                i.file_type_group, i.size_bytes, i.created_ts, i.modified_ts, i.best_time_ts,
                i.sha256, i.phash,
-               im.width, im.height, im.camera_model, im.taken_ts, im.meta_json, im.has_gps,
+               im.width, im.height, im.camera_model, im.taken_ts, im.meta_json,
                COALESCE(im.taken_ts, i.best_time_ts, i.modified_ts) AS sort_time_ts
         FROM items i
         LEFT JOIN item_metadata im ON im.item_id = i.item_id

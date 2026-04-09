@@ -1,27 +1,15 @@
 """
 NotingHill — services/dedup_service.py
-Exact + near-duplicate detection.
-
-Optimizations vs original:
-  • run_text_dedup / run_image_dedup: O(n²) → LSH  (see lsh/lsh_index.py)
-    With 500K files the old approach would take ~69 hours.
-    LSH completes in seconds/minutes.
-  • upsert_duplicate_group: already uses batch size lookup (kept).
-  • _cluster_and_save: replaced entirely with LSH-based version.
+Exact duplicate detection (sha256) + near-duplicate (simhash/phash).
 """
-from __future__ import annotations
-
-import time
-
 from ..db.connection import get_db
 from ..db import repo_duplicates
-from ..services.lsh.lsh_index import cluster_with_scores
+from ..services.signatures.simhash_service import similarity as simhash_sim
+from ..services.signatures.phash_service import phash_similarity
 
 
-# ── Exact dedup (SHA-256) — unchanged, already fast ──────────────────────
-
-def run_exact_dedup() -> int:
-    """Group files with identical sha256. Returns number of groups found."""
+def run_exact_dedup():
+    """Group files with identical sha256."""
     with get_db() as con:
         rows = con.execute("""
             SELECT sha256, GROUP_CONCAT(item_id) as ids
@@ -29,22 +17,14 @@ def run_exact_dedup() -> int:
             GROUP BY sha256 HAVING COUNT(*)>1
         """).fetchall()
 
-    count = 0
     for row in rows:
         sha = row["sha256"]
         ids = [int(i) for i in row["ids"].split(",")]
         repo_duplicates.upsert_duplicate_group("exact", sha, ids)
-        count += 1
-    return count
 
 
-# ── Near-duplicate dedup — O(n²) → LSH ───────────────────────────────────
-
-def run_text_dedup(threshold: float = 0.90) -> int:
-    """
-    Group files with similar simhash (hamming distance within threshold).
-    Uses LSH banding: O(n * bands) instead of O(n²).
-    """
+def run_text_dedup(threshold: float = 0.90):
+    """Group files with similar simhash (hamming distance < 7 of 64 bits)."""
     with get_db() as con:
         rows = con.execute("""
             SELECT item_id, simhash64 FROM items
@@ -52,14 +32,32 @@ def run_text_dedup(threshold: float = 0.90) -> int:
         """).fetchall()
 
     items = [(r["item_id"], r["simhash64"]) for r in rows]
-    return _lsh_cluster_and_save("similar_text", items, threshold)
+    visited = set()
+    groups = []
+
+    for i, (id_a, h_a) in enumerate(items):
+        if id_a in visited:
+            continue
+        group = [id_a]
+        scores = {id_a: 1.0}
+        for id_b, h_b in items[i+1:]:
+            if id_b in visited:
+                continue
+            sim = simhash_sim(h_a, h_b)
+            if sim >= threshold:
+                group.append(id_b)
+                scores[id_b] = sim
+        if len(group) > 1:
+            visited.update(group)
+            groups.append((group, scores))
+
+    for group, scores in groups:
+        key = f"simhash_{min(group)}"
+        repo_duplicates.upsert_duplicate_group("similar_text", key, group, scores)
 
 
-def run_image_dedup(threshold: float = 0.90) -> int:
-    """
-    Group images with similar perceptual hash.
-    Uses LSH banding: O(n * bands) instead of O(n²).
-    """
+def run_image_dedup(threshold: float = 0.90):
+    """Group images with similar perceptual hash."""
     with get_db() as con:
         rows = con.execute("""
             SELECT item_id, phash FROM items
@@ -67,32 +65,25 @@ def run_image_dedup(threshold: float = 0.90) -> int:
         """).fetchall()
 
     items = [(r["item_id"], r["phash"]) for r in rows]
-    return _lsh_cluster_and_save("similar_image", items, threshold)
+    visited = set()
+    groups = []
 
+    for i, (id_a, h_a) in enumerate(items):
+        if id_a in visited:
+            continue
+        group = [id_a]
+        scores = {id_a: 1.0}
+        for id_b, h_b in items[i+1:]:
+            if id_b in visited:
+                continue
+            sim = phash_similarity(h_a, h_b)
+            if sim >= threshold:
+                group.append(id_b)
+                scores[id_b] = sim
+        if len(group) > 1:
+            visited.update(group)
+            groups.append((group, scores))
 
-def _lsh_cluster_and_save(
-    group_type: str,
-    items: list[tuple[int, str]],
-    threshold: float,
-) -> int:
-    """
-    LSH clustering + persist groups.
-    Returns number of groups written.
-    """
-    if not items:
-        return 0
-
-    clusters = cluster_with_scores(items, threshold=threshold)
-
-    count = 0
-    for cluster_ids, score_map in clusters:
-        # Use a stable key: sorted item_ids joined
-        group_key = "_".join(str(i) for i in sorted(cluster_ids))
-        repo_duplicates.upsert_duplicate_group(
-            group_type,
-            group_key,
-            cluster_ids,
-            scores=score_map,
-        )
-        count += 1
-    return count
+    for group, scores in groups:
+        key = f"phash_{min(group)}"
+        repo_duplicates.upsert_duplicate_group("similar_image", key, group, scores)

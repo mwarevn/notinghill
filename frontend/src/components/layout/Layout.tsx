@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { id: 'multimedia', icon: '▶', labelKey: 'nav_multimedia' },
   { id: 'timeline', icon: '◈', labelKey: 'nav_timeline' },
   { id: 'duplicates', icon: '⊛', labelKey: 'nav_duplicates' },
+  { id: 'vfolders', icon: '📂', labelKey: 'nav_vfolders' },
   { id: 'indexing', icon: '⊞', labelKey: 'nav_indexing' },
   { id: 'settings', icon: '⚙', labelKey: 'nav_settings' },
 ]
@@ -17,18 +18,23 @@ interface LayoutProps {
 }
 
 export default function Layout({ children }: LayoutProps) {
-  const { theme, lang, activeTab, setTheme, setLang, setActiveTab, t, dashData } = useStore()
+  const { theme, lang, activeTab, setTheme, setLang, setActiveTab, t, dashData, animationsEnabled, setAnimationsEnabled } = useStore()
 
   useEffect(() => {
     document.documentElement.classList.toggle('light', theme === 'light')
   }, [theme])
+
+  // Sync animation class on mount (from persisted store)
+  useEffect(() => {
+    document.documentElement.classList.toggle('no-animations', !animationsEnabled)
+  }, [animationsEnabled])
 
   const isIndexing = (dashData?.active_jobs?.length ?? 0) > 0
 
   return (
     <div className="app-shell">
       <div className="grid-bg" />
-      <div className="scanline" />
+      {animationsEnabled && <div className="scanline" />}
 
       <header className="topbar">
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, minWidth: 0 }}>
@@ -59,6 +65,15 @@ export default function Layout({ children }: LayoutProps) {
 
           <button className="nh-btn ghost" style={{ padding: '9px 14px', fontSize: 10 }} onClick={() => setLang(lang === 'en' ? 'vi' : 'en')}>
             {lang === 'en' ? 'VI' : 'EN'}
+          </button>
+
+          <button
+            className="nh-btn ghost"
+            style={{ padding: '9px 14px', fontSize: 11, letterSpacing: 1, color: animationsEnabled ? 'var(--cyan)' : 'var(--text3)' }}
+            title={animationsEnabled ? 'Disable animations (improves performance)' : 'Enable animations'}
+            onClick={() => setAnimationsEnabled(!animationsEnabled)}
+          >
+            {animationsEnabled ? '✦ FX' : '◌ FX'}
           </button>
 
           <button className="nh-btn ghost" style={{ padding: '9px 14px', fontSize: 14 }} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>

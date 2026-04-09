@@ -2,18 +2,12 @@
 NotingHill — api/routes_search.py
 """
 from __future__ import annotations
-
-import mimetypes
-import os
-import subprocess
-import sys
+import mimetypes, os, subprocess, sys
 from pathlib import Path
 from typing import Optional
-
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
-
 from ..db import repo_items
 from ..services import llm_service, search_service
 
@@ -36,6 +30,8 @@ class AskRequest(BaseModel):
     max_size: Optional[int] = None
     since_ts: Optional[int] = None
     until_ts: Optional[int] = None
+    folder_path: Optional[str] = None
+    search_content: bool = False
     order_by: str = "rank"
     limit: int = 12
     offset: int = 0
@@ -56,16 +52,8 @@ def _guess_media_type(path: Path, fallback: str = "application/octet-stream") ->
     media_type, _ = mimetypes.guess_type(str(path))
     if not media_type:
         ext = path.suffix.lower()
-        if ext == ".md":
-            media_type = "text/markdown"
-        elif ext == ".csv":
-            media_type = "text/csv"
-        elif ext == ".json":
-            media_type = "application/json"
-        elif ext in {".yaml", ".yml"}:
-            media_type = "text/yaml"
-        else:
-            media_type = fallback
+        media_type = {"md": "text/markdown", ".csv": "text/csv",
+                      ".json": "application/json"}.get(ext, fallback)
     return media_type
 
 
@@ -79,8 +67,10 @@ def search(
     max_size: Optional[int] = None,
     since_ts: Optional[int] = None,
     until_ts: Optional[int] = None,
+    folder_path: Optional[str] = None,
+    search_content: bool = False,
     order_by: str = "rank",
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=100, le=200),
     offset: int = 0,
 ):
     results = search_service.search(
@@ -92,6 +82,8 @@ def search(
         max_size=max_size,
         since_ts=since_ts,
         until_ts=until_ts,
+        folder_path=folder_path,
+        search_content=search_content,
         order_by=order_by,
         limit=limit,
         offset=offset,
@@ -111,6 +103,8 @@ def ask(req: AskRequest):
             max_size=req.max_size,
             since_ts=req.since_ts,
             until_ts=req.until_ts,
+            folder_path=req.folder_path,
+            search_content=req.search_content,
             order_by=req.order_by,
             limit=req.limit,
             offset=req.offset,
@@ -132,15 +126,9 @@ def get_raw_file(item_id: int, download: int = 0):
     item = _safe_item(item_id)
     path = item["_path_obj"]
     media_type = _guess_media_type(path)
-    headers = None
-    if not download:
-        headers = {"Content-Disposition": f'inline; filename="{path.name}"'}
-    return FileResponse(
-        str(path),
-        media_type=media_type,
-        filename=path.name if download else None,
-        headers=headers,
-    )
+    headers = {"Content-Disposition": f'inline; filename="{path.name}"'} if not download else None
+    return FileResponse(str(path), media_type=media_type,
+                        filename=path.name if download else None, headers=headers)
 
 
 @router.get("/text/{item_id}")
@@ -149,14 +137,11 @@ def get_text_preview(item_id: int, max_chars: int = Query(default=50000, ge=500,
     extracted = item.get("extracted_text")
     if extracted:
         return PlainTextResponse(extracted[:max_chars], media_type="text/plain; charset=utf-8")
-
     path = item["_path_obj"]
     if path.suffix.lower() not in TEXT_EXTS:
         raise HTTPException(400, "Text preview not available")
-
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            text = fh.read(max_chars)
+        text = open(path, "r", encoding="utf-8", errors="replace").read(max_chars)
         return PlainTextResponse(text, media_type="text/plain; charset=utf-8")
     except Exception as exc:
         raise HTTPException(500, f"Unable to read text preview: {exc}")
@@ -168,7 +153,7 @@ def open_file(item_id: int):
     path = str(item["_path_obj"])
     try:
         if sys.platform == "win32":
-            os.startfile(path)  # type: ignore[attr-defined]
+            os.startfile(path)
         elif sys.platform == "darwin":
             subprocess.Popen(["open", path])
         else:

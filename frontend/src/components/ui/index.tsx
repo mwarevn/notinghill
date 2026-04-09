@@ -76,7 +76,7 @@ export function FileRow({
 }) {
   return (
     <div
-      className={`nh-card ${selected ? 'active' : ''} animate-rise-in`}
+      className={`nh-card ${selected ? 'active' : ''}`}
       onClick={onClick}
       style={{
         padding: '14px 16px',

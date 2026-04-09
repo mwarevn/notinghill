@@ -40,6 +40,7 @@ from app.api.routes_duplicates import router as duplicates_router
 from app.api.routes_indexing import router as indexing_router
 from app.api.routes_settings import router as settings_router
 from app.api.routes_images import router as images_router
+from app.api.routes_vfolders import router as vfolders_router
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("application/javascript", ".mjs")
@@ -76,6 +77,7 @@ app.include_router(duplicates_router)
 app.include_router(indexing_router)
 app.include_router(settings_router)
 app.include_router(images_router)
+app.include_router(vfolders_router)
 
 if STATIC_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")

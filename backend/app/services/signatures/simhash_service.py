@@ -1,21 +1,11 @@
 """
 NotingHill — services/signatures/simhash_service.py
-64-bit SimHash for near-duplicate text detection.
-
-Uses Rust extension when available (~25x faster).
-Falls back to pure-Python automatically.
+Lightweight 64-bit simhash for near-duplicate text detection.
+No external deps needed.
 """
 import hashlib
 import re
 
-try:
-    import notinghill_ext as _ext
-    _HAS_RUST = True
-except ImportError:
-    _HAS_RUST = False
-
-
-# ── Pure-Python implementation (fallback) ─────────────────────────────────
 
 def _shingles(text: str, k: int = 3) -> list[str]:
     tokens = re.findall(r'\w+', text.lower())
@@ -24,7 +14,7 @@ def _shingles(text: str, k: int = 3) -> list[str]:
     return [" ".join(tokens[i:i+k]) for i in range(len(tokens)-k+1)]
 
 
-def _compute_simhash_py(text: str) -> str | None:
+def compute_simhash(text: str) -> str | None:
     if not text or len(text) < 20:
         return None
     try:
@@ -43,15 +33,6 @@ def _compute_simhash_py(text: str) -> str | None:
         return None
 
 
-def compute_simhash(text: str) -> str | None:
-    if _HAS_RUST:
-        try:
-            return _ext.simhash64(text)
-        except Exception:
-            pass
-    return _compute_simhash_py(text)
-
-
 def hamming_distance(h1: str, h2: str) -> int:
     try:
         xor = int(h1, 16) ^ int(h2, 16)
@@ -61,7 +42,7 @@ def hamming_distance(h1: str, h2: str) -> int:
 
 
 def similarity(h1: str, h2: str) -> float:
-    """Returns 0.0–1.0, 1.0 = identical."""
+    """Returns 0.0-1.0, 1.0 = identical."""
     if not h1 or not h2:
         return 0.0
     dist = hamming_distance(h1, h2)

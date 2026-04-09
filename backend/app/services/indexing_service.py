@@ -1,13 +1,6 @@
 """
 NotingHill — services/indexing_service.py
-Orchestrates scan → extract → hash → persist pipeline.
-
-Key optimisations vs. original:
-  • Incremental scan: one batch query loads ALL (path→change_token) instead of
-    N per-file queries.
-  • _process_file: all DB writes go into a single connection/transaction per file
-    (one commit instead of ~8-9).
-  • FTS index is written inside the same transaction.
+Orchestrates scan → extract → hash → persist pipeline with DB-backed progress and resume.
 """
 from __future__ import annotations
 
@@ -17,9 +10,6 @@ from pathlib import Path
 
 from ..core import file_classifier, time_utils, job_queue
 from ..db import repo_items, repo_jobs, repo_search
-from ..db.connection import get_db
-from ..db.repo_content import _upsert_content_tx, _upsert_metadata_tx
-from ..db.repo_search import _fts_index_item_tx
 from ..services.extractors.text_extractor import TextExtractor
 from ..services.extractors.pdf_extractor import PdfExtractor
 from ..services.extractors.docx_extractor import DocxExtractor
@@ -49,8 +39,58 @@ def _get_extractor(path: Path):
     return None
 
 
-def start_index(root_id: int, root_path: str, full_rescan: bool = False,
-                resume_job_id: int | None = None) -> int:
+
+def _norm(p: str) -> str:
+    """Normalize path for cross-platform comparison.
+    - resolve() handles symlinks and relative paths
+    - normcase() lowercases on Windows (case-insensitive FS)
+    - trailing sep ensures /mnt/data != /mnt/data2
+    """
+    try:
+        resolved = str(Path(p).resolve())
+    except OSError:
+        resolved = os.path.abspath(p)
+    return os.path.normcase(resolved)
+
+
+def _get_excluded_root_prefixes(current_root_id: int, current_root_path: str) -> list[str]:
+    """
+    Return normalized path prefixes of other active roots that are
+    subdirectories of current_root_path.
+    Works correctly on Windows (case-insensitive, backslash),
+    Linux and macOS (case-sensitive, forward slash).
+    """
+    from ..db.connection import get_db
+
+    # Add trailing sep so prefix check is exact at boundary:
+    # /mnt/data/ will NOT match /mnt/data2/foo
+    current_prefix = _norm(current_root_path) + os.sep
+
+    excluded: list[str] = []
+    with get_db() as con:
+        rows = con.execute(
+            "SELECT root_id, root_path FROM roots WHERE is_enabled=1 AND root_id!=?",
+            (current_root_id,),
+        ).fetchall()
+
+    for row in rows:
+        other_norm = _norm(row["root_path"])
+        # other is inside current → exclude during scan
+        if other_norm.startswith(current_prefix):
+            excluded.append(other_norm + os.sep)
+
+    return excluded
+
+
+def _is_excluded(fpath: Path, excluded_prefixes: list[str]) -> bool:
+    """Check if a path falls under any excluded prefix. Cross-platform safe."""
+    if not excluded_prefixes:
+        return False
+    normalized = os.path.normcase(str(fpath))
+    return any(normalized.startswith(p) for p in excluded_prefixes)
+
+
+
     if resume_job_id is not None:
         job_id = resume_job_id
         repo_jobs.prepare_resume(job_id)
@@ -59,6 +99,7 @@ def start_index(root_id: int, root_path: str, full_rescan: bool = False,
 
     job_queue.enqueue(_run_scan, root_id, root_path, job_id, full_rescan)
     return job_id
+
 
 
 def resume_incomplete_jobs() -> list[int]:
@@ -78,6 +119,7 @@ def resume_incomplete_jobs() -> list[int]:
         start_index(root_id, root_path, full_rescan=False, resume_job_id=job["job_id"])
         resumed.append(job["job_id"])
     return resumed
+
 
 
 def _run_scan(root_id: int, root_path: str, job_id: int, full_rescan: bool) -> None:
@@ -108,19 +150,23 @@ def _run_scan(root_id: int, root_path: str, job_id: int, full_rescan: bool) -> N
         updated_ts=int(time.time()),
     )
 
-    # ── Batch load existing change_tokens (one query, not N) ──────────────
-    known_tokens: dict[str, str] = {}
-    if not full_rescan:
-        known_tokens = repo_items.batch_load_change_tokens(root_id)
-
     try:
+        excluded_prefixes = _get_excluded_root_prefixes(root_id, root_path)
+
         for dirpath, dirnames, filenames in os.walk(root):
+            # Skip entire subdirectories covered by another active root + ignored dirs
             dirnames[:] = [
                 d for d in dirnames
                 if not file_classifier.should_ignore(Path(dirpath) / d)
+                and not _is_excluded(Path(dirpath) / d, excluded_prefixes)
             ]
             for fname in filenames:
                 fpath = Path(dirpath) / fname
+
+                # Skip files under another active root's path (cross-platform)
+                if _is_excluded(fpath, excluded_prefixes):
+                    continue
+
                 if file_classifier.should_ignore(fpath):
                     continue
 
@@ -133,13 +179,22 @@ def _run_scan(root_id: int, root_path: str, job_id: int, full_rescan: bool) -> N
                     )
 
                 if not full_rescan:
-                    try:
-                        s = fpath.stat()
-                        token = f"{s.st_size}:{int(s.st_mtime)}"
-                        if known_tokens.get(str(fpath)) == token:
-                            continue
-                    except OSError:
-                        pass
+                    existing_id = repo_items.get_item_id_by_path(str(fpath))
+                    if existing_id:
+                        try:
+                            s = fpath.stat()
+                            token = f"{s.st_size}:{int(s.st_mtime)}"
+                            from ..db.connection import get_db
+
+                            with get_db() as con:
+                                row = con.execute(
+                                    "SELECT change_token FROM items WHERE item_id=?",
+                                    (existing_id,),
+                                ).fetchone()
+                            if row and row["change_token"] == token:
+                                continue
+                        except OSError:
+                            pass
 
                 job_queue.enqueue(_process_file, root_id, str(fpath), job_id)
                 queued_new += 1
@@ -170,11 +225,8 @@ def _run_scan(root_id: int, root_path: str, job_id: int, full_rescan: bool) -> N
         )
 
 
+
 def _process_file(root_id: int, full_path: str, job_id: int) -> None:
-    """
-    Process one file — all DB writes committed in a single transaction.
-    Order: upsert_item → extract content+metadata → hash → fts_index → status=done
-    """
     path = Path(full_path)
     try:
         s = path.stat()
@@ -187,7 +239,6 @@ def _process_file(root_id: int, full_path: str, job_id: int) -> None:
     file_type_group = file_classifier.classify(path)
     times = time_utils.get_file_times(path)
     token = f"{s.st_size}:{int(s.st_mtime)}"
-    now = int(time.time())
 
     item_data = {
         "root_id": root_id,
@@ -200,55 +251,35 @@ def _process_file(root_id: int, full_path: str, job_id: int) -> None:
         "file_type_group": file_type_group,
         "indexing_status": "processing",
         "is_deleted": 0,
-        "is_hidden": int(path.name.startswith(".")),
+        "is_hidden": path.name.startswith("."),
         "is_system": 0,
-        "first_seen_ts": now,
-        "last_seen_ts": now,
-        "last_indexed_ts": now,
+        "first_seen_ts": int(time.time()),
+        "last_seen_ts": int(time.time()),
+        "last_indexed_ts": int(time.time()),
         "change_token": token,
         **times,
     }
 
-    # ── Run extraction outside the DB transaction (CPU/IO bound) ─────────
+    try:
+        item_id = repo_items.upsert_item(item_data)
+    except Exception as exc:
+        repo_jobs.log_error(job_id, full_path, "db_insert", "DB_ERROR", str(exc))
+        repo_jobs.bump_job_counts(job_id, pending_delta=-1, current_file=full_path)
+        _try_finish_job(job_id)
+        return
+
     extractor = _get_extractor(path)
-    result = None
-    extract_error: str | None = None
     if extractor:
         try:
             result = extractor.extract(path)
-        except Exception as exc:
-            extract_error = str(exc)
-            repo_jobs.log_error(job_id, full_path, "extract", "EXTRACT_ERROR", str(exc))
+            if result.metadata:
+                from ..db import repo_content as rc
+                from ..db.connection import get_db
 
-    # ── Compute hashes outside transaction ────────────────────────────────
-    sha = None
-    simhash_val = None
-    phash_val = None
-    try:
-        sha = compute_sha256(path)
-
-        if file_type_group in ("text", "code", "pdf", "office") and result and result.text:
-            simhash_val = compute_simhash(result.text)
-
-        if file_type_group == "image":
-            phash_val = compute_phash(path)
-    except Exception as exc:
-        repo_jobs.log_error(job_id, full_path, "hash", "HASH_ERROR", str(exc))
-
-    # ── Single transaction: upsert + content + metadata + fts + status ───
-    try:
-        with get_db() as con:
-            # 1. upsert item
-            item_id = repo_items.upsert_item_tx(con, item_data)
-
-            # 2. content + metadata
-            if result:
-                if result.metadata:
-                    _upsert_metadata_tx(con, item_id, result.metadata)
-
-                    # Update best_time if we have a better source
-                    if result.metadata.get("taken_ts"):
-                        updated = time_utils.inject_metadata_time(times, result.metadata)
+                rc.upsert_metadata(item_id, result.metadata)
+                if result.metadata.get("taken_ts"):
+                    updated = time_utils.inject_metadata_time(times, result.metadata)
+                    with get_db() as con:
                         con.execute(
                             """
                             UPDATE items
@@ -262,43 +293,47 @@ def _process_file(root_id: int, full_path: str, job_id: int) -> None:
                                 item_id,
                             ),
                         )
+                        con.commit()
 
-                text = result.text or ""
-                preview = result.preview or text[:400]
-                _upsert_content_tx(con, item_id, text, preview, len(text), result.language)
+            text = result.text or ""
+            preview = result.preview or text[:400]
+            from ..db import repo_content as rc2
 
-                # 3. FTS index inside same transaction
-                meta_title = (result.metadata or {}).get("title", "")
-                _fts_index_item_tx(con, item_id, path.name, full_path, text, meta_title)
+            rc2.upsert_content(item_id, text, preview, len(text), result.language)
 
-            # 4. hashes + final status
-            con.execute(
-                """
-                UPDATE items
-                SET sha256=COALESCE(?,sha256),
-                    simhash64=COALESCE(?,simhash64),
-                    phash=COALESCE(?,phash),
-                    indexing_status='done',
-                    content_status=CASE WHEN ? IS NOT NULL THEN 'done' ELSE content_status END,
-                    metadata_status=CASE WHEN ? IS NOT NULL THEN 'done' ELSE metadata_status END
-                WHERE item_id=?
-                """,
-                (sha, simhash_val, phash_val,
-                 result.text if result else None,
-                 result.metadata if result else None,
-                 item_id),
-            )
+            meta_title = (result.metadata or {}).get("title", "")
+            repo_search.fts_index_item(item_id, path.name, full_path, text, meta_title)
 
-            con.commit()
+        except Exception as exc:
+            repo_jobs.log_error(job_id, full_path, "extract", "EXTRACT_ERROR", str(exc))
 
+    try:
+        sha = compute_sha256(path)
+        simhash = None
+        phash_val = None
+
+        if file_type_group in ("text", "code", "pdf", "office"):
+            from ..db.connection import get_db
+
+            with get_db() as con:
+                row = con.execute(
+                    "SELECT extracted_text FROM item_content WHERE item_id=?",
+                    (item_id,),
+                ).fetchone()
+            if row and row["extracted_text"]:
+                simhash = compute_simhash(row["extracted_text"])
+
+        if file_type_group == "image":
+            phash_val = compute_phash(path)
+
+        repo_items.update_hashes(item_id, sha256=sha, simhash64=simhash, phash=phash_val)
     except Exception as exc:
-        repo_jobs.log_error(job_id, full_path, "db_write", "DB_ERROR", str(exc))
-        repo_jobs.bump_job_counts(job_id, pending_delta=-1, error_delta=1, current_file=full_path)
-        _try_finish_job(job_id)
-        return
+        repo_jobs.log_error(job_id, full_path, "hash", "HASH_ERROR", str(exc))
 
+    repo_items.update_status(item_id, indexing_status="done")
     repo_jobs.bump_job_counts(job_id, indexed_delta=1, pending_delta=-1, current_file=full_path)
     _try_finish_job(job_id)
+
 
 
 def _try_finish_job(job_id: int) -> None:
@@ -307,6 +342,7 @@ def _try_finish_job(job_id: int) -> None:
 
     try:
         from ..services.dedup_service import run_exact_dedup, run_text_dedup, run_image_dedup
+
         try:
             run_exact_dedup()
             run_text_dedup()
@@ -320,12 +356,6 @@ def _try_finish_job(job_id: int) -> None:
             current_file="",
             finished_ts=int(time.time()),
         )
-        # Run PRAGMA optimize + incremental_vacuum after full job
-        try:
-            from ..db.connection import optimize_db
-            optimize_db()
-        except Exception:
-            pass
     except Exception as exc:
         repo_jobs.update_job(
             job_id,

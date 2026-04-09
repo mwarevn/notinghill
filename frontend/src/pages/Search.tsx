@@ -1,13 +1,67 @@
 // NotingHill — pages/Search.tsx
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { useStore } from '../store'
-import { searchFiles, getItem, openFile, revealFile, listRoots, getItemRawUrl } from '../api/client'
+import { searchFiles, getItem, openFile, revealFile, listRoots, getItemRawUrl, listVFolders, addItemToVFolder } from '../api/client'
 import { FileRow, SectionHeader, Badge, EmptyState } from '../components/ui'
 import { formatSize, formatDateTime, getTypeIcon } from '../utils/helpers'
 
 const FILE_TYPES = ['text', 'code', 'pdf', 'office', 'image', 'audio', 'video', 'archive', 'other']
 const TEXT_LIKE_EXTS = new Set(['.txt', '.md', '.markdown', '.json', '.xml', '.yaml', '.yml', '.csv', '.log', '.ini', '.cfg', '.toml', '.py', '.js', '.ts', '.tsx', '.jsx', '.css', '.scss', '.html', '.sql', '.java', '.c', '.cpp', '.h', '.hpp', '.go', '.rs', '.php', '.rb', '.sh', '.bat', '.ps1'])
 const OFFICE_EXTS = new Set(['.doc', '.docx', '.xls', '.xlsx', '.xlsm', '.ppt', '.pptx'])
+
+const ROW_HEIGHT = 82 // px — approximate height of each FileRow
+const OVERSCAN = 5  // extra rows rendered above/below viewport
+
+function VirtualList({ items, selectedId, onSelect }: {
+  items: any[]
+  selectedId: number | null
+  onSelect: (item: any) => void
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [scrollTop, setScrollTop] = useState(0)
+  const [containerHeight, setContainerHeight] = useState(600)
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(([entry]) => {
+      setContainerHeight(entry.contentRect.height)
+    })
+    ro.observe(el)
+    setContainerHeight(el.clientHeight)
+    return () => ro.disconnect()
+  }, [])
+
+  const totalHeight = items.length * ROW_HEIGHT
+  const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN)
+  const visibleCount = Math.ceil(containerHeight / ROW_HEIGHT) + OVERSCAN * 2
+  const endIndex = Math.min(items.length, startIndex + visibleCount)
+  const visibleItems = items.slice(startIndex, endIndex)
+  const offsetY = startIndex * ROW_HEIGHT
+
+  return (
+    <div
+      ref={containerRef}
+      style={{ flex: 1, overflowY: 'auto', padding: '12px 16px', position: 'relative' }}
+      onScroll={e => setScrollTop((e.target as HTMLDivElement).scrollTop)}
+    >
+      {items.length === 0 ? null : (
+        <div style={{ height: totalHeight, position: 'relative' }}>
+          <div style={{ position: 'absolute', top: offsetY, left: 0, right: 0 }}>
+            {visibleItems.map(item => (
+              <FileRow
+                key={item.item_id}
+                item={item}
+                selected={selectedId === item.item_id}
+                onClick={() => onSelect(item)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
 
 export default function Search() {
   const {
@@ -18,16 +72,23 @@ export default function Search() {
 
   const [roots, setRoots] = useState<any[]>([])
   const [sortBy, setSortBy] = useState('rank')
+  const [folderPath, setFolderPath] = useState('')
+  const [searchContent, setSearchContent] = useState(false)
+  const [vfolders, setVFoldersLocal] = useState<any[]>([])
+  const [addToVFItem, setAddToVFItem] = useState<any | null>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     listRoots().then(d => setRoots(d.roots || []))
+    listVFolders().then(d => setVFoldersLocal(d.folders || []))
   }, [])
 
-  const doSearch = useCallback(async (q: string, filters: any, sort: string) => {
+  const doSearch = useCallback(async (q: string, filters: any, sort: string, fp: string, sc: boolean) => {
     setSearchLoading(true)
     try {
       const params: any = { q, order_by: sort, limit: 100, ...filters }
+      if (fp.trim()) params.folder_path = fp.trim()
+      if (sc) params.search_content = true
       Object.keys(params).forEach(k => (params[k] === '' || params[k] == null) && delete params[k])
       const data = await searchFiles(params)
       setSearchResults(data.results || [])
@@ -38,20 +99,12 @@ export default function Search() {
   }, [setSearchLoading, setSearchResults])
 
   useEffect(() => {
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current)
-    }
-
+    if (debounceRef.current) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(() => {
-      doSearch(searchQuery, searchFilters, sortBy)
+      doSearch(searchQuery, searchFilters, sortBy, folderPath, searchContent)
     }, 280)
-
-    return () => {
-      if (debounceRef.current) {
-        clearTimeout(debounceRef.current)
-      }
-    }
-  }, [searchQuery, searchFilters, sortBy, doSearch])
+    return () => { if (debounceRef.current) clearTimeout(debounceRef.current) }
+  }, [searchQuery, searchFilters, sortBy, folderPath, searchContent, doSearch])
 
   const handleSelectItem = async (item: any) => {
     try {
@@ -62,9 +115,7 @@ export default function Search() {
     }
   }
 
-  const filterStyle: React.CSSProperties = {
-    display: 'flex', flexDirection: 'column', gap: 6,
-  }
+  const filterStyle: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 6 }
 
   return (
     <div style={{ display: 'flex', height: 'calc(100vh - var(--topbar-height))', overflow: 'hidden' }}>
@@ -164,6 +215,39 @@ export default function Search() {
             </button>
           ))}
         </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 9, color: 'var(--text3)', letterSpacing: 2, marginBottom: 8 }}>FOLDER PATH</div>
+          <input
+            className="nh-input"
+            style={{ fontSize: 10, padding: '6px 8px' }}
+            placeholder="e.g. Documents or *Work*"
+            value={folderPath}
+            onChange={e => setFolderPath(e.target.value)}
+          />
+          <div style={{ fontSize: 8, color: 'var(--text3)', marginTop: 4, letterSpacing: 0.5 }}>
+            Wildcards: * = any chars
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={searchContent}
+              onChange={e => setSearchContent(e.target.checked)}
+              style={{ accentColor: 'var(--cyan)', width: 14, height: 14 }}
+            />
+            <span style={{ fontSize: 9, color: searchContent ? 'var(--cyan)' : 'var(--text3)', letterSpacing: 1.5 }}>
+              SEARCH IN CONTENT
+            </span>
+          </label>
+          {searchContent && (
+            <div style={{ fontSize: 8, color: 'var(--amber)', marginTop: 4, letterSpacing: 0.5 }}>
+              ⚠ Slower — searches file text
+            </div>
+          )}
+        </div>
       </aside>
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -210,22 +294,22 @@ export default function Search() {
           {searchQuery && <span style={{ color: 'var(--cyan)', marginLeft: 8 }}>&quot;{searchQuery}&quot;</span>}
         </div>
 
-        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
-          {!searchLoading && searchResults.length === 0 && searchQuery && (
+        {!searchLoading && searchResults.length === 0 && searchQuery && (
+          <div style={{ padding: '12px 16px' }}>
             <EmptyState icon="◎" message={t('search_no_results')} />
-          )}
-          {!searchQuery && searchResults.length === 0 && (
+          </div>
+        )}
+        {!searchQuery && searchResults.length === 0 && (
+          <div style={{ padding: '12px 16px' }}>
             <EmptyState icon="◎" message={t('search_placeholder')} />
-          )}
-          {searchResults.map(item => (
-            <FileRow
-              key={item.item_id}
-              item={item}
-              selected={selectedItem?.item_id === item.item_id}
-              onClick={() => handleSelectItem(item)}
-            />
-          ))}
-        </div>
+          </div>
+        )}
+
+        <VirtualList
+          items={searchResults}
+          selectedId={selectedItem?.item_id ?? null}
+          onSelect={handleSelectItem}
+        />
       </div>
 
       <aside style={{
@@ -263,6 +347,13 @@ export default function Search() {
                 onClick={() => revealFile(selectedItem.item_id)}
               >
                 {t('preview_reveal')}
+              </button>
+              <button
+                className="nh-btn"
+                style={{ flex: 1, fontSize: 9 }}
+                onClick={() => setAddToVFItem(selectedItem)}
+              >
+                + VF
               </button>
             </div>
 
@@ -312,6 +403,48 @@ export default function Search() {
           </div>
         )}
       </aside>
+
+      {/* ── Add to Virtual Folder modal ── */}
+      {addToVFItem && (
+        <div
+          style={{ position: 'fixed', inset: 0, background: 'rgba(4,10,16,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1400 }}
+          onClick={() => setAddToVFItem(null)}
+        >
+          <div
+            style={{ background: 'var(--bg1)', border: '1px solid var(--border)', borderRadius: 20, padding: 24, width: 360 }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text)', marginBottom: 6, letterSpacing: 2 }}>ADD TO VIRTUAL FOLDER</div>
+            <div style={{ fontSize: 10, color: 'var(--text3)', marginBottom: 16, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {addToVFItem.file_name}
+            </div>
+            {vfolders.length === 0 ? (
+              <div style={{ fontSize: 10, color: 'var(--text3)', padding: '12px 0' }}>No virtual folders. Create one first.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 300, overflowY: 'auto' }}>
+                {vfolders.map((vf: any) => (
+                  <button
+                    key={vf.vf_id}
+                    className="nh-btn"
+                    style={{ textAlign: 'left', justifyContent: 'flex-start', gap: 8, display: 'flex', alignItems: 'center' }}
+                    onClick={async () => {
+                      await addItemToVFolder(vf.vf_id, addToVFItem.item_id)
+                      setAddToVFItem(null)
+                    }}
+                  >
+                    <span>{vf.icon}</span>
+                    <span style={{ color: vf.color }}>{vf.name}</span>
+                    <span style={{ marginLeft: 'auto', fontSize: 9, color: 'var(--text3)' }}>{vf.item_count} files</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end' }}>
+              <button className="nh-btn" onClick={() => setAddToVFItem(null)}>CANCEL</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

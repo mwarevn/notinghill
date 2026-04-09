@@ -497,6 +497,36 @@ html.light .nh-textarea { background: rgba(255, 255, 255, 0.86); }
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* ── Performance: no-animations mode ── */
+html.no-animations body::before,
+html.no-animations body::after {
+  animation: none !important;
+}
+html.no-animations .scanline {
+  display: none !important;
+}
+html.no-animations .topbar,
+html.no-animations .sidebar {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+html.no-animations .nh-card {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  transition: none !important;
+}
+html.no-animations .nh-btn {
+  transition: none !important;
+}
+html.no-animations .animate-fade-in,
+html.no-animations .animate-slide-in,
+html.no-animations .animate-rise-in {
+  animation: none !important;
+}
+html.no-animations .nh-btn::before {
+  display: none !important;
+}
+
 @media (max-width: 1100px) {
   :root { --sidebar-width: 84px; }
   .stat-grid-responsive,

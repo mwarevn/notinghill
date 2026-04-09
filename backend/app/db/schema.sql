@@ -245,3 +245,32 @@ CREATE TABLE IF NOT EXISTS saved_searches (
   created_ts      INTEGER NOT NULL,
   updated_ts      INTEGER NOT NULL
 );
+
+-- ============================================================
+-- 12. virtual_folders — tree structure
+-- ============================================================
+CREATE TABLE IF NOT EXISTS virtual_folders (
+  vf_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  parent_vf_id INTEGER REFERENCES virtual_folders(vf_id) ON DELETE CASCADE,
+  name         TEXT NOT NULL,
+  color        TEXT DEFAULT '#67e8f9',
+  icon         TEXT DEFAULT '📁',
+  created_ts   INTEGER NOT NULL,
+  updated_ts   INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_vf_parent ON virtual_folders(parent_vf_id);
+
+-- ============================================================
+-- 13. virtual_folder_items — many-to-many file membership
+-- ============================================================
+CREATE TABLE IF NOT EXISTS virtual_folder_items (
+  vf_item_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+  vf_id        INTEGER NOT NULL REFERENCES virtual_folders(vf_id) ON DELETE CASCADE,
+  item_id      INTEGER NOT NULL REFERENCES items(item_id) ON DELETE CASCADE,
+  added_ts     INTEGER NOT NULL,
+  UNIQUE(vf_id, item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vfi_vf_id   ON virtual_folder_items(vf_id);
+CREATE INDEX IF NOT EXISTS idx_vfi_item_id ON virtual_folder_items(item_id);
